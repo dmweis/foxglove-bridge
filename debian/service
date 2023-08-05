@@ -1,0 +1,15 @@
+[Unit]
+Description=Foxglove Bridge
+After=network-online.target nss-lookup.target
+Wants=network-online.target
+
+[Service]
+User=foxglovebridge
+DynamicUser=yes
+Type=simple
+Restart=on-failure
+RestartSec=5s
+ExecStart=/usr/bin/foxglove-bridge --listen tcp/0.0.0.0:7447
+
+[Install]
+WantedBy=default.target

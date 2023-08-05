@@ -1,0 +1,6 @@
+.vscode
+Cargo.lock
+/target
+
+out.mcap
+docker_out/
