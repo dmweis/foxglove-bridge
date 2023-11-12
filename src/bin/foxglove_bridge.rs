@@ -36,7 +36,10 @@ fn json_schema_table() -> &'static HashMap<String, String> {
     static INSTANCE: OnceLock<HashMap<String, String>> = OnceLock::new();
     INSTANCE.get_or_init(|| {
         let mut m = HashMap::new();
-        m.insert("GENERIC_JSON".to_owned(), GENERIC_JSON_SCHEMA.to_owned());
+        m.insert(
+            "GENERIC_JSON_SCHEMA".to_owned(),
+            GENERIC_JSON_SCHEMA.to_owned(),
+        );
         m.insert(
             "IKEA_DIMMER_JSON_SCHEMA".to_owned(),
             IKEA_DIMMER_JSON_SCHEMA.to_owned(),
@@ -52,6 +55,10 @@ fn json_schema_table() -> &'static HashMap<String, String> {
         m.insert(
             "CLIMATE_SENSOR_JSON_SCHEMA".to_owned(),
             CLIMATE_SENSOR_JSON_SCHEMA.to_owned(),
+        );
+        m.insert(
+            "VOICE_PROBABILITY_JSON_SCHEMA".to_owned(),
+            VOICE_PROBABILITY_JSON_SCHEMA.to_owned(),
         );
         m
     })
@@ -128,6 +135,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     for json_subscription in &config.json_subscriptions {
+        info!(?json_subscription, "Starting json subscription");
         let json_schema = if let Some(json_schema_name) = &json_subscription.json_schema_name {
             json_schema_table()
                 .get(json_schema_name)
@@ -436,4 +444,23 @@ const CLIMATE_SENSOR_JSON_SCHEMA: &str = r#"
     "voltage"
 ]
 }
+"#;
+
+const VOICE_PROBABILITY_JSON_SCHEMA: &str = r#"
+{
+    "$schema": "http://json-schema.org/draft-04/schema#",
+    "type": "object",
+    "properties": {
+      "probability": {
+        "type": "number"
+      },
+      "timestamp": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "probability",
+      "timestamp"
+    ]
+  }
 "#;
