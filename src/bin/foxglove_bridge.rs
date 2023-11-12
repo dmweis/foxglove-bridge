@@ -1,14 +1,18 @@
+use anyhow::Context;
 use clap::Parser;
 use foxglove_ws::{Channel, FoxgloveWebSocket};
 use mcap::records::system_time_to_nanos;
 use once_cell::sync::Lazy;
-use prost_reflect::{DescriptorPool, ReflectMessage};
-use std::{net::SocketAddr, sync::Arc, time::SystemTime};
+use prost_reflect::{DescriptorPool, MessageDescriptor};
+use std::{
+    collections::HashMap, net::SocketAddr, path::PathBuf, sync::Arc, sync::OnceLock,
+    time::SystemTime,
+};
 use tokio::signal;
 use tracing::info;
-use zenoh::{config::Config, prelude::r#async::*};
+use zenoh::prelude::r#async::*;
 
-use foxglove_bridge::setup_tracing;
+use foxglove_bridge::{setup_tracing, FoxgloveBridgeError};
 
 static FILE_DESCRIPTOR_SET: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/file_descriptor_set.bin"));
@@ -28,22 +32,37 @@ pub mod hopper {
     include!(concat!(env!("OUT_DIR"), "/hopper.rs"));
 }
 
+fn json_schema_table() -> &'static HashMap<String, String> {
+    static INSTANCE: OnceLock<HashMap<String, String>> = OnceLock::new();
+    INSTANCE.get_or_init(|| {
+        let mut m = HashMap::new();
+        m.insert("GENERIC_JSON".to_owned(), GENERIC_JSON_SCHEMA.to_owned());
+        m.insert(
+            "IKEA_DIMMER_JSON_SCHEMA".to_owned(),
+            IKEA_DIMMER_JSON_SCHEMA.to_owned(),
+        );
+        m.insert(
+            "MOTION_SENSOR_JSON_SCHEMA".to_owned(),
+            MOTION_SENSOR_JSON_SCHEMA.to_owned(),
+        );
+        m.insert(
+            "CONTACT_SENSOR_JSON_SCHEMA".to_owned(),
+            CONTACT_SENSOR_JSON_SCHEMA.to_owned(),
+        );
+        m.insert(
+            "CLIMATE_SENSOR_JSON_SCHEMA".to_owned(),
+            CLIMATE_SENSOR_JSON_SCHEMA.to_owned(),
+        );
+        m
+    })
+}
+
 #[derive(Parser, Debug)]
 #[command()]
 struct Args {
-    /// lidar prefix
-    ///
-    /// Prefix for all topics
-    #[clap(long, default_value = "rplidar")]
-    prefix: String,
-
-    /// publish topic
-    #[clap(long, default_value = "laser_scan")]
-    scan_topic: String,
-
-    /// publish topic
-    #[clap(long, default_value = "point_cloud")]
-    cloud_topic: String,
+    /// Subscription config path
+    #[clap(long, default_value = "config/config.yaml")]
+    config: PathBuf,
 
     /// Endpoints to connect to.
     #[clap(short = 'e', long)]
@@ -63,6 +82,10 @@ async fn main() -> anyhow::Result<()> {
     let args: Args = Args::parse();
     setup_tracing()?;
 
+    // read config
+    let file = std::fs::File::open(&args.config)?;
+    let config: foxglove_bridge::config::Configuration = serde_yaml::from_reader(file)?;
+
     // start foxglove server
     let server = foxglove_ws::FoxgloveWebSocket::new();
     tokio::spawn({
@@ -71,180 +94,108 @@ async fn main() -> anyhow::Result<()> {
     });
 
     // configure zenoh
-    let mut zenoh_config = Config::default();
-    if !args.listen.is_empty() {
-        zenoh_config.listen.endpoints = args.listen.clone();
-        info!(listen_endpoints= ?zenoh_config.listen.endpoints, "Configured listening endpoints");
-    }
-    if !args.connect.is_empty() {
-        zenoh_config.connect.endpoints = args.connect.clone();
-        info!(connect_endpoints= ?zenoh_config.connect.endpoints, "Configured connect endpoints");
-    }
+    // let mut zenoh_config = Config::default();
+    // if !args.listen.is_empty() {
+    //     zenoh_config.listen.endpoints = args.listen.clone();
+    //     info!(listen_endpoints= ?zenoh_config.listen.endpoints, "Configured listening endpoints");
+    // }
+    // if !args.connect.is_empty() {
+    //     zenoh_config.connect.endpoints = args.connect.clone();
+    //     info!(connect_endpoints= ?zenoh_config.connect.endpoints, "Configured connect endpoints");
+    // }
 
-    let zenoh_session = zenoh::open(zenoh_config).res().await.unwrap();
+    let zenoh_config = config.zenoh.get_zenoh_config()?;
+
+    let zenoh_session = zenoh::open(zenoh_config)
+        .res()
+        .await
+        .map_err(FoxgloveBridgeError::ZenohError)?;
     let zenoh_session = zenoh_session.into_arc();
     info!("Started zenoh session");
 
-    let scan_topic = format!("{}/{}", args.prefix, args.scan_topic)
-        .trim_matches('/')
-        .to_owned();
-    start_proto_subscriber(
-        &scan_topic,
-        zenoh_session.clone(),
-        &server,
-        &foxglove::LaserScan::default(),
-    )
-    .await?;
+    for proto_subscription in &config.protobuf_subscriptions {
+        let message_descriptor = DESCRIPTOR_POOL
+            .get_message_by_name(&proto_subscription.proto_type)
+            .context("Failed to find protobuf message descriptor by name")?;
 
-    let cloud_topic = format!("{}/{}", args.prefix, args.cloud_topic)
-        .trim_matches('/')
-        .to_owned();
-    start_proto_subscriber(
-        &cloud_topic,
-        zenoh_session.clone(),
-        &server,
-        &foxglove::PointCloud::default(),
-    )
-    .await?;
+        start_proto_subscriber_from_descriptor(
+            &proto_subscription.topic,
+            zenoh_session.clone(),
+            &server,
+            &message_descriptor,
+        )
+        .await?;
+    }
 
-    start_proto_subscriber(
-        "hopper/camera/image",
-        zenoh_session.clone(),
-        &server,
-        &foxglove::CompressedImage::default(),
-    )
-    .await?;
+    for json_subscription in &config.json_subscriptions {
+        let json_schema = if let Some(json_schema_name) = &json_subscription.json_schema_name {
+            json_schema_table()
+                .get(json_schema_name)
+                .context("Failed to load json schema")?
+        } else {
+            GENERIC_JSON_SCHEMA
+        };
 
-    start_proto_subscriber(
-        "hopper/pose/frames",
-        zenoh_session.clone(),
-        &server,
-        &foxglove::FrameTransforms::default(),
-    )
-    .await?;
+        let latched = json_subscription.latched.unwrap_or(false);
 
-    start_proto_subscriber(
-        "hopper/metrics/diagnostic",
-        zenoh_session.clone(),
-        &server,
-        &hopper::DiagnosticMessage::default(),
-    )
-    .await?;
+        start_json_subscriber(
+            &json_subscription.topic,
+            zenoh_session.clone(),
+            &server,
+            &json_subscription.type_name,
+            json_schema,
+            latched,
+        )
+        .await?;
+    }
 
-    start_json_subscriber(
-        "zigbee2mqtt/ikea_dimmer",
-        zenoh_session.clone(),
-        &server,
-        "IkeaDimmer",
-        IKEA_DIMMER_JSON_SCHEMA,
-        false,
-    )
-    .await?;
-
-    start_json_subscriber(
-        "zigbee2mqtt/motion/one",
-        zenoh_session.clone(),
-        &server,
-        "MotionSensor",
-        MOTION_SENSOR_JSON_SCHEMA,
-        true,
-    )
-    .await?;
-
-    start_json_subscriber(
-        "zigbee2mqtt/motion/two",
-        zenoh_session.clone(),
-        &server,
-        "MotionSensor",
-        MOTION_SENSOR_JSON_SCHEMA,
-        true,
-    )
-    .await?;
-
-    start_json_subscriber(
-        "zigbee2mqtt/motion/three",
-        zenoh_session.clone(),
-        &server,
-        "MotionSensor",
-        MOTION_SENSOR_JSON_SCHEMA,
-        true,
-    )
-    .await?;
-
-    start_json_subscriber(
-        "zigbee2mqtt/contact/fridge",
-        zenoh_session.clone(),
-        &server,
-        "ContactSensor",
-        CONTACT_SENSOR_JSON_SCHEMA,
-        true,
-    )
-    .await?;
-
-    start_json_subscriber(
-        "zigbee2mqtt/contact/main_door",
-        zenoh_session.clone(),
-        &server,
-        "ContactSensor",
-        CONTACT_SENSOR_JSON_SCHEMA,
-        true,
-    )
-    .await?;
-
-    start_json_subscriber(
-        "zigbee2mqtt/contact/lock",
-        zenoh_session.clone(),
-        &server,
-        "ContactSensor",
-        CONTACT_SENSOR_JSON_SCHEMA,
-        true,
-    )
-    .await?;
-
-    start_json_subscriber(
-        "zigbee2mqtt/climate_sensor/one",
-        zenoh_session.clone(),
-        &server,
-        "ClimateSensor",
-        CLIMATE_SENSOR_JSON_SCHEMA,
-        true,
-    )
-    .await?;
-
-    signal::ctrl_c().await.unwrap();
+    signal::ctrl_c().await?;
     info!("ctrl-c received, exiting");
 
     Ok(())
 }
 
-async fn start_proto_subscriber(
+async fn start_proto_subscriber_from_descriptor(
     topic: &str,
     zenoh_session: Arc<Session>,
     foxglove_server: &FoxgloveWebSocket,
-    protobuf: &dyn ReflectMessage,
+    protobuf_descriptor: &MessageDescriptor,
 ) -> anyhow::Result<()> {
     info!(topic, "Starting proto subscriber");
-    let zenoh_subscriber = zenoh_session.declare_subscriber(topic).res().await.unwrap();
+    let zenoh_subscriber = zenoh_session
+        .declare_subscriber(topic)
+        .res()
+        .await
+        .map_err(FoxgloveBridgeError::ZenohError)?;
 
-    let foxglove_channel = create_publisher_for_protobuf(protobuf, foxglove_server, topic).await?;
+    let foxglove_channel =
+        create_publisher_for_protobuf_descriptor(protobuf_descriptor, foxglove_server, topic)
+            .await?;
 
     tokio::spawn({
         let topic = topic.to_owned();
         async move {
             let mut message_counter = 0;
             loop {
-                let sample = zenoh_subscriber.recv_async().await.unwrap();
-                message_counter += 1;
-                let now = SystemTime::now();
-                let time_nanos = system_time_to_nanos(&now);
-                let payload: Vec<u8> = sample.value.try_into().unwrap();
-                foxglove_channel.send(time_nanos, &payload).await.unwrap();
+                let res: anyhow::Result<()> = async {
+                    let sample = zenoh_subscriber.recv_async().await?;
+                    message_counter += 1;
+                    let now = SystemTime::now();
+                    let time_nanos = system_time_to_nanos(&now);
+                    let payload: Vec<u8> = sample.value.try_into()?;
+                    foxglove_channel.send(time_nanos, &payload).await?;
 
-                if message_counter % 20 == 0 {
-                    info!(
-                        topic,
-                        message_counter, "{} sent {} messages", topic, message_counter
-                    );
+                    if message_counter % 20 == 0 {
+                        info!(
+                            topic,
+                            message_counter, "{} sent {} messages", topic, message_counter
+                        );
+                    }
+                    Ok(())
+                }
+                .await;
+                if let Err(err) = res {
+                    tracing::error!(topic, "Error receiving message: {}", err);
                 }
             }
         }
@@ -254,17 +205,17 @@ async fn start_proto_subscriber(
 
 const PROTOBUF_ENCODING: &str = "protobuf";
 
-async fn create_publisher_for_protobuf(
-    protobuf: &dyn ReflectMessage,
+async fn create_publisher_for_protobuf_descriptor(
+    protobuf_descriptor: &MessageDescriptor,
     foxglove_server: &FoxgloveWebSocket,
     topic: &str,
 ) -> anyhow::Result<Channel> {
-    let protobuf_schema_data = protobuf.descriptor().parent_pool().encode_to_vec();
+    let protobuf_schema_data = protobuf_descriptor.parent_pool().encode_to_vec();
     foxglove_server
         .create_publisher(
             topic,
             PROTOBUF_ENCODING,
-            protobuf.descriptor().full_name(),
+            protobuf_descriptor.full_name(),
             protobuf_schema_data,
             Some(PROTOBUF_ENCODING),
             false,
@@ -283,7 +234,11 @@ async fn start_json_subscriber(
     latched: bool,
 ) -> anyhow::Result<()> {
     info!(topic, "Starting json subscriber");
-    let zenoh_subscriber = zenoh_session.declare_subscriber(topic).res().await.unwrap();
+    let zenoh_subscriber = zenoh_session
+        .declare_subscriber(topic)
+        .res()
+        .await
+        .map_err(FoxgloveBridgeError::ZenohError)?;
     let foxglove_channel = foxglove_server
         .create_publisher(
             topic,
@@ -300,18 +255,44 @@ async fn start_json_subscriber(
         async move {
             let mut message_counter = 0;
             loop {
-                let sample = zenoh_subscriber.recv_async().await.unwrap();
-                message_counter += 1;
-                let now = SystemTime::now();
-                let time_nanos = system_time_to_nanos(&now);
-                let payload: Vec<u8> = sample.value.try_into().unwrap();
-                foxglove_channel.send(time_nanos, &payload).await.unwrap();
+                let res: anyhow::Result<()> = async {
+                    let sample = zenoh_subscriber.recv_async().await?;
+                    message_counter += 1;
+                    let now = SystemTime::now();
+                    let time_nanos = system_time_to_nanos(&now);
 
-                if message_counter % 20 == 0 {
-                    info!(
-                        topic,
-                        message_counter, "{} sent {} messages", topic, message_counter
-                    );
+                    let payload = match &sample.encoding {
+                        Encoding::Exact(KnownEncoding::TextPlain) => {
+                            let payload: String = sample.value.try_into()?;
+                            payload.as_bytes().to_vec()
+                        }
+                        Encoding::Exact(KnownEncoding::TextJson) => {
+                            let payload: String = sample.value.try_into()?;
+                            payload.as_bytes().to_vec()
+                        }
+                        Encoding::Exact(KnownEncoding::AppOctetStream) => {
+                            let payload: Vec<u8> = sample.value.try_into()?;
+                            payload
+                        }
+                        _ => {
+                            tracing::error!(topic, "Unknown encoding: {:?}", sample.encoding);
+                            panic!("Unknown encoding");
+                        }
+                    };
+
+                    foxglove_channel.send(time_nanos, &payload).await?;
+
+                    if message_counter % 20 == 0 {
+                        info!(
+                            topic,
+                            message_counter, "{} sent {} messages", topic, message_counter
+                        );
+                    }
+                    Ok(())
+                }
+                .await;
+                if let Err(err) = res {
+                    tracing::error!(topic, "Error receiving message: {}", err);
                 }
             }
         }

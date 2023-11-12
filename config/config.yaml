@@ -1,0 +1,49 @@
+
+zenoh:
+  connect:
+    - "tcp/homepi:7447"
+    - "tcp/dork:7447"
+    - "udp/dork:7448"
+  listen:
+    - "tcp/0.0.0.0:7447"
+    - "udp/0.0.0.0:7448"
+
+protobuf_subscriptions:
+  - topic: "hopper/lidar/point_cloud"
+    proto_type: "foxglove.PointCloud"
+  - topic: "hopper/lidar/laser_scan"
+    proto_type: "foxglove.LaserScan"
+  - topic: "hopper/camera/image"
+    proto_type: "foxglove.CompressedImage"
+  - topic: "hopper/pose/frames"
+    proto_type: "foxglove.FrameTransforms"
+  - topic: "hopper/metrics/diagnostic"
+    proto_type: "hopper.DiagnosticMessage"
+
+
+json_subscriptions:
+  - topic: "zigbee2mqtt/ikea_dimmer"
+    type_name: "IkeaDimmer"
+    json_schema_name: "IKEA_DIMMER_JSON_SCHEMA"
+  - topic: "zigbee2mqtt/motion/one"
+    type_name: "MotionSensor"
+    json_schema_name: "MOTION_SENSOR_JSON_SCHEMA"
+  - topic: "zigbee2mqtt/motion/two"
+    type_name: "MotionSensor"
+    json_schema_name: "MOTION_SENSOR_JSON_SCHEMA"
+  - topic: "zigbee2mqtt/motion/three"
+    type_name: "MotionSensor"
+    json_schema_name: "MOTION_SENSOR_JSON_SCHEMA"
+  - topic: "zigbee2mqtt/contact/fridge"
+    type_name: "ContactSensor"
+    json_schema_name: "CONTACT_SENSOR_JSON_SCHEMA"
+  - topic: "zigbee2mqtt/contact/main_door"
+    type_name: "ContactSensor"
+    json_schema_name: "CONTACT_SENSOR_JSON_SCHEMA"
+  - topic: "zigbee2mqtt/contact/lock"
+    type_name: "ContactSensor"
+    json_schema_name: "CONTACT_SENSOR_JSON_SCHEMA"
+  - topic: "zigbee2mqtt/climate_sensor/one"
+    type_name: "ClimateSensor"
+    json_schema_name: "CLIMATE_SENSOR_JSON_SCHEMA"
+    latched: true
