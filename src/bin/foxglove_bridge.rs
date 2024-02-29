@@ -111,7 +111,10 @@ async fn main() -> anyhow::Result<()> {
     //     info!(connect_endpoints= ?zenoh_config.connect.endpoints, "Configured connect endpoints");
     // }
 
-    let zenoh_config = config.zenoh.get_zenoh_config()?;
+    let mut zenoh_config = config.zenoh.get_zenoh_config()?;
+
+    zenoh_config.connect.endpoints.extend(args.connect);
+    zenoh_config.listen.endpoints.extend(args.listen);
 
     let zenoh_session = zenoh::open(zenoh_config)
         .res()
