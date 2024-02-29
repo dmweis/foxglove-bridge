@@ -1,4 +1,3 @@
-
 zenoh:
   connect:
     - "tcp/homepi:7447"
@@ -19,7 +18,6 @@ protobuf_subscriptions:
     proto_type: "foxglove.FrameTransforms"
   - topic: "hopper/metrics/diagnostic"
     proto_type: "hopper.DiagnosticMessage"
-
 
 json_subscriptions:
   - topic: "zigbee2mqtt/ikea_dimmer"
@@ -48,16 +46,16 @@ json_subscriptions:
     json_schema_name: "CLIMATE_SENSOR_JSON_SCHEMA"
     latched: true
 
-  - topic: "wakeword/event/wake_word_detection"
+  - topic: "hopper_wakeword/event/wake_word_detection"
     type_name: "WakeWordDetection"
     json_schema_name: "GENERIC_JSON_SCHEMA"
-  - topic: "wakeword/event/wake_word_detection_end"
+  - topic: "hopper_wakeword/event/wake_word_detection_end"
     type_name: "WakeWordDetectionEnd"
     json_schema_name: "GENERIC_JSON_SCHEMA"
-  - topic: "wakeword/event/transcript"
+  - topic: "hopper_wakeword/event/transcript"
     type_name: "WakeWordTranscript"
     json_schema_name: "GENERIC_JSON_SCHEMA"
-  - topic: "wakeword/telemetry/voice_probability"
+  - topic: "hopper_wakeword/telemetry/voice_probability"
     type_name: "VoiceProbability"
     json_schema_name: "VOICE_PROBABILITY_JSON_SCHEMA"
   - topic: "hopper/openai/diagnostics/history"
